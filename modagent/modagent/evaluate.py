@@ -51,6 +51,7 @@ def cost_usd(in_tok: dict, out_tok: dict, prices: dict):
 
 def write_report(path, title, cfg, m, ci, lat, items, per_cat, cost_total, esc_rate, tool_rate, parse_fail):
     n = len(items)
+    review = sum(bool(r.get("needs_review")) for r in items)
     L = [f"# {title}", "", "## Config", "```", *[f"{k}: {v}" for k, v in cfg.items()], "```", "",
          "## Quality", f"- precision **{m['precision']:.3f}**, recall **{m['recall']:.3f}**, F1 **{m['f1']:.3f}** "
          f"(95% bootstrap CI {ci[0]:.3f}-{ci[1]:.3f}), accuracy {m['accuracy']:.3f}, n={m['n']}",
@@ -59,13 +60,15 @@ def write_report(path, title, cfg, m, ci, lat, items, per_cat, cost_total, esc_r
         L.append(f"- gold category `{c}`: {v['correct']}/{v['n']} flagged correctly")
     L += ["", "## Latency and cost",
           f"- per-item latency (s): mean {lat['mean']}, p50 {lat['p50']}, p95 {lat['p95']}",
-          f"- escalation rate: {esc_rate:.1%}; tool-use rate: {tool_rate:.1%}; unparseable outputs: {parse_fail}"]
+          f"- escalation rate: {esc_rate:.1%}; tool-use rate: {tool_rate:.1%}; weak-model unparseable (before escalation): {parse_fail}",
+          f"- needs human review (no usable answer from any model): {review} ({review / n:.1%}); "
+          "metrics above count these as not flagged"]
     if cost_total is None:
         L.append("- cost: not computed (no --prices file supplied)")
     else:
         L.append(f"- cost: ${cost_total:.4f} total, **${cost_total / n * 1000:.3f} per 1,000 items**")
     for kind, flt in (("False positives (flagged, gold ok)", lambda r: r["pred"] == "violating" and r["gold"] == "ok"),
-                      ("False negatives (missed violations)", lambda r: r["pred"] == "ok" and r["gold"] == "violating")):
+                      ("False negatives (missed violations)", lambda r: r["pred"] != "violating" and r["gold"] == "violating")):
         rows = [r for r in items if flt(r)][:8]
         L += ["", f"## {kind}"]
         for r in rows:
