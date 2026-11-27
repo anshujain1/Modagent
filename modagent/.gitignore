@@ -65,3 +65,8 @@ desktop.ini
 # ==============================
 results/*_items.json
 results/*.log
+
+cd modagent
+Get-Content .gitignore
+Add-Content .gitignore "results/*.items.jsonl"
+python -m pytest -q

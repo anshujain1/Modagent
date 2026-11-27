@@ -23,16 +23,40 @@ class Provider:
         raise NotImplementedError
 
 
+RETRY_STATUS = (429, 500, 502, 503, 529)
+
+
+def _backoff(attempt: int, resp=None) -> float:
+    wait = min(2 ** attempt, 20)
+    if resp is not None:   # honour Retry-After when the server sends one
+        try:
+            wait = max(wait, min(float(resp.headers.get("retry-after", 0)), 60))
+        except (TypeError, ValueError):
+            pass
+    return wait
+
+
 def _post_with_retry(client, url, headers, payload, retries=6):
-    r = None
+    """POST with backoff on rate limits, 5xx and network errors (timeouts, resets, DNS).
+    Raises RuntimeError that includes the response body, which is what explains a 400."""
+    last = None
     for attempt in range(retries):
-        r = client.post(url, headers=headers, json=payload, timeout=60)
-        if r.status_code in (429, 500, 502, 503, 529):
-            time.sleep(min(2 ** attempt, 20))
+        try:
+            r = client.post(url, headers=headers, json=payload, timeout=60)
+        except httpx.TransportError as e:
+            last = e
+            time.sleep(_backoff(attempt))
             continue
-        r.raise_for_status()
+        if r.status_code in RETRY_STATUS:
+            last = r
+            time.sleep(_backoff(attempt, r))
+            continue
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code} from {url}: {r.text[:300]}")
         return r.json()
-    r.raise_for_status()
+    if isinstance(last, httpx.Response):
+        raise RuntimeError(f"HTTP {last.status_code} from {url} after {retries} attempts: {last.text[:300]}")
+    raise RuntimeError(f"request to {url} failed after {retries} attempts: {last!r}")
 
 
 class OpenAICompatProvider(Provider):
@@ -84,6 +108,8 @@ class MockProvider(Provider):
     def complete(self, system, messages, model, max_tokens=400):
         t0 = time.perf_counter()
         text = messages[0]["content"].split("TEXT:\n", 1)[1]
+        if "FORCE_HTTP_ERROR" in text and not os.environ.get("MODAGENT_MOCK_HEAL"):
+            raise RuntimeError("mock HTTP 500")   # lets tests exercise per-item failure handling and --resume
         tool_turns = [m for m in messages if m["role"] == "user" and m["content"].startswith("TOOL_RESULT")]
         tools_on = "check_signals" in system
         if tools_on and not tool_turns:

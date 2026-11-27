@@ -4,6 +4,11 @@ Flow per item:
   1. weak model reads the text, may call tools (lookup_policy, check_signals), then returns JSON.
   2. if the answer is unparseable or confidence < threshold, the strong model re-judges from scratch.
 Every call's tokens and latency are accumulated so cost/latency can be reported per item.
+
+If nothing parseable comes back from any model, the item is NOT silently approved. `fail_mode` decides the label:
+  "review" (default): label "review" + needs_review=True   -> route to a human queue
+  "open":             label "ok"      + needs_review=True   -> old behaviour
+  "closed":           label "violating" + needs_review=True
 """
 import json
 import time
@@ -11,6 +16,8 @@ from dataclasses import dataclass, field
 
 from .policy import get_policy
 from .rules import signals
+
+FAIL_MODES = {"review": "review", "open": "ok", "closed": "violating"}
 
 TOOLS_DESC = """TOOLS (you may call at most {n} before answering):
  - lookup_policy: returns the moderation policy text. args: {{}}
@@ -50,17 +57,22 @@ class Decision:
     confidence: float = 0.0
     reason: str = ""
     escalated: bool = False
-    parse_failed: bool = False
+    parse_failed: bool = False        # the weak model's output was unusable (even if escalation recovered)
+    needs_review: bool = False        # no model produced a usable answer; label comes from fail_mode
     tools_used: list = field(default_factory=list)
     models: list = field(default_factory=list)
     input_tokens: dict = field(default_factory=dict)   # model -> tokens
     output_tokens: dict = field(default_factory=dict)
-    latency_s: float = 0.0
+    latency_s: float = 0.0            # summed model-call latency
+    wall_s: float = 0.0               # end-to-end time for the item, incl. tool execution
 
 
 class ModerationAgent:
     def __init__(self, provider, domain, weak_model, strong_model=None, threshold=0.8,
-                 use_tools=True, max_tool_calls=2):
+                 use_tools=True, max_tool_calls=2, fail_mode="review"):
+        if fail_mode not in FAIL_MODES:
+            raise ValueError(f"fail_mode must be one of {sorted(FAIL_MODES)}")
+        self.fail_mode = fail_mode
         self.p, self.domain = provider, domain
         self.weak, self.strong = weak_model, strong_model
         self.threshold, self.use_tools, self.max_tool_calls = threshold, use_tools, max_tool_calls
@@ -119,8 +131,8 @@ class ModerationAgent:
             out2 = self._run(self.strong, text, d)
             if out2 is not None:
                 out = out2
-        if out is None:   # nothing parseable: fail open to "ok" and flag it
-            d.label, d.reason = "ok", "unparseable model output"
+        if out is None:   # nothing parseable from any model: apply fail_mode and flag it
+            d.label, d.reason, d.needs_review = FAIL_MODES[self.fail_mode], "unparseable model output", True
         else:
             d.label, d.category, d.confidence, d.reason = out
         d.wall_s = time.perf_counter() - t0
