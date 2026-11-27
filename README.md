@@ -33,7 +33,7 @@ boundary, so expect a ceiling below 100%.
 pip install -r requirements.txt
 python scripts/prepare_data.py          # builds data/*_eval.jsonl and *_train.jsonl
 python scripts/baseline.py              # TF-IDF + logistic regression, no API needed
-python -m pytest -q                     # 13 tests, offline (mock provider)
+python -m pytest -q                     # 25 tests, offline (mock provider)
 
 export ANTHROPIC_API_KEY=...            # or MODAGENT_API_KEY / MODAGENT_BASE_URL for OpenAI-compatible
 echo '{"<weak-model>": [IN_PER_1M, OUT_PER_1M], "<strong-model>": [IN_PER_1M, OUT_PER_1M]}' > prices.json   # current list prices in USD
@@ -44,6 +44,20 @@ python scripts/run_eval.py --dataset spam --provider anthropic --weak <weak-mode
 python scripts/run_eval.py --dataset spam --provider anthropic --weak <strong-model> --no-escalate         --prices prices.json --run spam_strong_only
 python scripts/run_eval.py --dataset spam --provider anthropic --weak <weak-model> --no-escalate --no-tools --prices prices.json --run spam_weak_notools
 ```
+Runs are fault tolerant: each finished item is appended to `results/<run>.items.jsonl`, an item that errors is recorded
+instead of aborting the run, and `--resume` re-runs only what is missing or failed. Items that still failed are left out
+of the metrics and the script exits with code 3. If no model returns a parseable answer, the item goes to a review queue
+(`--fail-mode review`, the default; `open` = treat as ok, `closed` = flag it) and the report shows the queue size.
+
+**Threshold sweep, no extra API spend.** The `weak_only` and `strong_only` runs contain everything needed to replay
+escalation at any confidence threshold:
+```bash
+python scripts/sweep.py --weak results/spam_weak_only.json --strong results/spam_strong_only.json --name spam --plot
+```
+This writes F1 / escalation rate / cost per 1,000 items per threshold, the cheapest threshold within 0.01 F1 of
+strong-only, a calibration table for the weak model's confidence, and a trade-off plot. (Both runs must use the same
+dataset, `--limit` and tool setting.)
+
 Each run writes `results/<run>.md` (metrics, bootstrap CI on F1, latency p50/p95, cost per 1,000 items, escalation and
 tool-use rates, false positives/negatives with the model's reasons) and `results/<run>.json` (per item).
 
